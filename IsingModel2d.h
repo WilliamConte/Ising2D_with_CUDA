@@ -13,16 +13,15 @@ class IsingModel2d{
     public:
         
         // constructor  
-        IsingModel2d(int L, double T, unsigned int seed);
+        IsingModel2d(int L, double T, double J, double h, unsigned int seed);
 
         void update(Mode mode, int steps);
-
-        double energy();
-
-        double magnetization();
-
+        double energy(Mode mode);
+        double magnetization(Mode mode);
         // setter function to change the block size once the object is already created
         void cuda_grid_size(int size){ cuda_block_size = size; };
+
+        
 
         /// Pybind functions ///
         // helper functions for Pybind11: in this way Python will read directly from the RAM without copying 
@@ -37,9 +36,13 @@ class IsingModel2d{
     private:
         
         int L;
+        int row_stride;
         double T;
         double beta;
+        double J = 1; // interaction term
+        double h = 0; // magnetic field
         int cuda_block_size = 16;
+
 
         // lattice is already flattened in 1D vector for simplicity on next phases 
         std::vector<int> lattice;
@@ -49,9 +52,15 @@ class IsingModel2d{
         std::vector<std::mt19937> omp_rngs; // one number per thread to avoid race conditions
 
         // internal logic
+        void sync_padding();
         void step_serial();
         void step_openmp();
         void step_cuda();
+        void Metropolis_update(int i, int j, std::mt19937& rng);
+
+        // lookup table: this will be essentialy a probability grid to 
+        // avoid computing exp every time
+        float lookup_probs[2][5];
 };
 
 #endif

@@ -26,7 +26,7 @@ IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int see
         // to index 1 the values of spin +1
         double s = (s_idx == 0) ? -1.0 : 1.0;
         
-        // for a given spin value, store the probability of spin flip given the neighbors
+    // for a given spin value, store the probability of spin flip given the neighbors
     for (int i = 0; i < 5; ++i) {
         // Index mapping: index 0 is relative to value of neighbors -4 (i.e., all negative)
         int physical_sum = (i * 2) - 4; // possible sum of neighbors is -4,-2,0,2,4
@@ -83,26 +83,34 @@ void IsingModel2d::step_serial() {
 
 void IsingModel2d::step_openmp(){
     sync_padding();
-    // chessboard update: update only "alternating" spins to avoid race conditions
     
-    
-    // update even indices
-    for(int i = 1; i <= L; i++){
-        for(int j = 1; j <= L; j++){
-            if ((i+j) % 2 == 0){
-                Metropolis_update(i,j/*random number generator*/);
+    // start parallel region
+    #pragma omp parallel 
+    {
+        // assign threads indices
+        int thread_index = omp_get_thread_num();
+        std::mt19937& thread_rng = omp_rngs[thread_index]; 
+        
+        // update even indices
+        #pragma omp for collapse(2)
+        for(int i = 1; i <= L; i++){
+            for(int j = 1; j <= L; j++){
+                if ((i+j) % 2 == 0){
+                    Metropolis_update(i, j, thread_rng);
+                }
             }
         }
-    }
-
-    //update odd indices
-    for(int i = 1; i <= L; i++){
-        for(int j = 1; j <= L; j++){
-            if ((i+j) % 2 != 0){
-                Metropolis_update(i,j/*random number generator*/);
+        
+        // update the odd indices
+        #pragma omp for collapse(2)
+        for(int i = 1; i <= L; i++){
+            for(int j = 1; j <= L; j++){
+                if ((i+j) % 2 != 0){
+                    Metropolis_update(i, j, thread_rng);
+                }
             }
         }
-    }
+    } // End of parallel region
 }
 
 
@@ -128,27 +136,40 @@ double IsingModel2d::magnetization(Mode mode) {
             }
         }
     }
-
     
-    // Return the absolute average magnetization
     return m / (double)(L * L);
 }
 
 
 double IsingModel2d::energy(Mode mode) {
     double E = 0.0;
+    
     if (mode == Mode::serial){
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
                 int array_index = i * row_stride + j;
-                int neighbors = lattice[(i - 1) * row_stride + j] + lattice[(i + 1) * row_stride + j] + lattice[i * row_stride + (j - 1)] + lattice[i * row_stride + (j + 1)];
+                int neighbors = lattice[(i - 1) * row_stride + j] + lattice[(i + 1) * row_stride + j] + 
+                lattice[i * row_stride + (j - 1)] + lattice[i * row_stride + (j + 1)];
                 // Interaction energy (halved for double counting) + field energy
                 E += -0.5 * J * lattice[array_index] * neighbors - h * lattice[array_index];
             }
         }
     }
     //parallel openMP
-    /************/
+
+    if (mode == Mode::parallel_cpu){
+        #pragma omp parallel for collapse(2) reduction(+:E)
+        for (int i = 1; i <= L; i++) {
+            for (int j = 1; j <= L; j++) {
+                int array_index = i * row_stride + j;
+                int neighbors = lattice[(i - 1) * row_stride + j] + lattice[(i + 1) * row_stride + j] + 
+                lattice[i * row_stride + (j - 1)] + lattice[i * row_stride + (j + 1)];
+                
+                // interaction energy (halved for double counting) + field energy
+                E += -0.5 * J * lattice[array_index] * neighbors - h * lattice[array_index];
+            }
+        }
+    }
 
     //parallel CUDA
     /************/

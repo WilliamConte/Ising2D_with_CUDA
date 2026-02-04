@@ -1,6 +1,8 @@
 #include "IsingModel2d.h"
+#include "Ising_gpu_interface.h"
 
-// constructor definition
+
+/****************** CONSTRUCTOR *********************/
 IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int seed) : L(L), row_stride(L + 2), T(T), J(J), h(h), beta(1.0/T), serial_rng(seed) {
     // initialize lattice with total size including padding
     lattice.resize(row_stride * row_stride); 
@@ -15,7 +17,7 @@ IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int see
         }
     }
 
-    // initialize RNG engines for parallel threads
+    // initialize RNG engines for parallel threads in OPENMP
     int max_threads = omp_get_max_threads();
     for (int i = 0; i < max_threads; i++) {
         omp_rngs.emplace_back(seed + i + 1);
@@ -26,17 +28,30 @@ IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int see
         // to index 1 the values of spin +1
         double s = (s_idx == 0) ? -1.0 : 1.0;
         
-    // for a given spin value, store the probability of spin flip given the neighbors
-    for (int i = 0; i < 5; ++i) {
-        // Index mapping: index 0 is relative to value of neighbors -4 (i.e., all negative)
-        int physical_sum = (i * 2) - 4; // possible sum of neighbors is -4,-2,0,2,4
-        // compute delta E
-        double dE = 2.0 * s * (J * physical_sum + h);
-        lookup_probs[s_idx][i] = (dE > 0) ? std::exp(-dE * beta) : 1.0;
-        }
+        // for a given spin value, store the probability of spin flip given the neighbors
+        for (int i = 0; i < 5; ++i) {
+            // Index mapping: index 0 is relative to value of neighbors -4 (i.e., all negative)
+            int physical_sum = (i * 2) - 4; // possible sum of neighbors is -4,-2,0,2,4
+            // compute delta E
+            double delta_E = 2.0 * s * (J * physical_sum + h);
+            lookup_probs[s_idx][i] = (delta_E > 0) ? std::exp(-delta_E * beta) : 1.0;
+            }
     }
+
+    // Cuda allocation:
+    allocate_cuda();
+    upload_lookup_probs(); // Copy lookup tables
+    unsigned int cuda_seed = seed + 123; // different cuda seed
+    launch_setup_rng(d_states, cuda_seed, L, row_stride);
 }
 
+
+/****************** DESTRUCTOR *********************/
+IsingModel2d::~IsingModel2d() {
+    deallocate_cuda();
+}
+
+/***************** SYNC PADDING (ON HOST) **********/
 void IsingModel2d::sync_padding() {
     // 
     for (int k = 1; k <= L; k++) {
@@ -46,6 +61,8 @@ void IsingModel2d::sync_padding() {
         lattice[k * row_stride + (L + 1)] = lattice[k * row_stride + 1];     // Right pad Col
     }
 }
+
+/****************** METROPOLIS RULE *********************/
 
 void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
     int array_index = i * row_stride + j;
@@ -65,6 +82,8 @@ void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
     }
 }
 
+/****************** UPDATE STEP SERIAL *********************/
+
 void IsingModel2d::step_serial() {
     //synchronize the padding 
     sync_padding();
@@ -80,6 +99,8 @@ void IsingModel2d::step_serial() {
         Metropolis_update(i,j,serial_rng);
     }
 }
+
+/****************** UPDATE STEP OPENMP *********************/
 
 void IsingModel2d::step_openmp(){
     sync_padding();
@@ -114,7 +135,40 @@ void IsingModel2d::step_openmp(){
 }
 
 
+/******************* CUDA MEMORY HANDLING ***************/
 
+// allocate memory on device 
+void IsingModel2d::allocate_cuda() {
+    size_t lattice_bytes = row_stride * row_stride * sizeof(int);
+    size_t states_bytes = row_stride * row_stride * 70; // excess CuRand state dimension estimation
+
+    d_lattice = (int*)gpu_alloc(lattice_bytes);
+    d_states = gpu_alloc(states_bytes);
+    d_lookup_probs = (float*)gpu_alloc(10 * sizeof(float));
+}
+
+void IsingModel2d::copy_to_device() {
+    gpu_memcpy_to_device(d_lattice, lattice.data(), lattice.size() * sizeof(int));
+}
+
+void IsingModel2d::copy_to_host() {
+    gpu_memcpy_to_host(lattice.data(), d_lattice, lattice.size() * sizeof(int));
+}
+
+void IsingModel2d::deallocate_cuda() {
+    gpu_free(d_lattice);
+    gpu_free(d_states);
+    gpu_free(d_lookup_probs);
+}
+
+/****************** UPDATE STEP CUDA *********************/
+
+void IsingModel2d::step_cuda(){
+    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
+}
+
+/*************** MAGNETIZATION ************************/
 double IsingModel2d::magnetization(Mode mode) {
     double m = 0.0;
     
@@ -140,6 +194,7 @@ double IsingModel2d::magnetization(Mode mode) {
     return m / (double)(L * L);
 }
 
+/*************** ENERGY ************************/
 
 double IsingModel2d::energy(Mode mode) {
     double E = 0.0;
@@ -178,6 +233,7 @@ double IsingModel2d::energy(Mode mode) {
     return E;
 }
 
+/******* UPDATE STEP ********/
 void IsingModel2d::update(Mode mode, int steps) {
     switch(mode) {
         case Mode::serial:

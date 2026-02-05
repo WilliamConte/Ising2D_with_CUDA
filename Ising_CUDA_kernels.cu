@@ -1,6 +1,8 @@
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>
+#include <cuda_runtime.h>
+#include <iostream>
 #include "Ising_gpu_interface.h"
 
 // Memory handling
@@ -57,11 +59,18 @@ __global__ void Ising_step_kernel(int* lattice, int L, int row_stride, float* lo
         if ((x + y) % 2 == color) {
             int spin_index = y * row_stride + x; 
             int current_spin = lattice[spin_index];
+
+            // used "__ldg()" (Load Global Read-Only) for neighbors.
+            // Tn the chessboard algorithm, when we update "white" cells, 
+            // the black neighbors are NOT modified (they are read-only).   
+            // __ldg() forces the GPU to route these reads through the texture cache 
+            // (a separate hardware path) and effectively increasing memory bandwidth for non-coalesced reads
+            // (which is happening for the chessboard algorithm).
             
-            int sum_n = lattice[(y - 1) * row_stride + x] + 
-                        lattice[(y + 1) * row_stride + x] + 
-                        lattice[y * row_stride + (x - 1)] + 
-                        lattice[y * row_stride + (x + 1)];
+            int sum_n = __ldg(&lattice[(y - 1) * row_stride + x]) + 
+                        __ldg(&lattice[(y + 1) * row_stride + x]) + 
+                        __ldg(&lattice[y * row_stride + (x - 1)]) + 
+                        __ldg(&lattice[y * row_stride + (x + 1)]);
             
             int lookup_index_0 = (current_spin == -1) ? 0 : 1;
             int lookup_index_1 = (sum_n + 4) / 2;
@@ -75,32 +84,45 @@ __global__ void Ising_step_kernel(int* lattice, int L, int row_stride, float* lo
     }
 }
 
+
 /******************** Wrappers (Kernel launch) **********************/
 
-void launch_setup_rng(void* d_states, unsigned int seed, int L, int row_stride, int block_size) {
+void launch_setup_rng(void* d_states, unsigned int seed, int L, int row_stride) {
     curandState* states = (curandState*)d_states;
 
-    // create blocks
-    dim3 block(block_size, block_size);
+    dim3 block(16, 16);
     dim3 grid((L + block.x - 1) / block.x, (L + block.y - 1) / block.y);
-    
+
     setup_rand_kernel<<<grid, block>>>(states, seed, L, row_stride);
+
+    cudaDeviceSynchronize();
 }
 
-void launch_sync_padding_gpu(int* d_lattice, int L, int row_stride, int block_size) {
-    // Per il padding (che è 1D), usiamo un blocco lineare di block_size * block_size thread
-    int threads = block_size * block_size; 
+void launch_sync_padding_gpu(int* d_lattice, int L, int row_stride) {
+    // use fixed number of threads for padding.
+    int threads = 256; 
     int grid = (L + threads - 1) / threads;
     
     sync_padding_kernel<<<grid, threads>>>(d_lattice, L, row_stride);
 }
 
 void launch_metropolis_step(int* d_lattice, int L, int row_stride, float* d_lookup_probs, int color, void* d_states, int block_size) {
+    // cast to the correct type
     curandState* states = (curandState*)d_states;
+
+    // Safety Check: Il lato non può superare 32 (32x32 = 1024 max threads)
+    if (block_size > 32) {
+        std::cout << "WARNING: Block size"<< block_size << "x" << block_size <<"is too large! Clamping to 32.\n", block_size;
+        block_size = 32;
+    }
 
     dim3 block(block_size, block_size);
     dim3 grid((L + block.x - 1) / block.x, (L + block.y - 1) / block.y);
     
-    // Launch kernel
+    // launch kernel
     Ising_step_kernel<<<grid, block>>>(d_lattice, L, row_stride, d_lookup_probs, color, states);
+}
+
+void launch_cuda_sync(){
+    cudaDeviceSynchronize();
 }

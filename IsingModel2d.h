@@ -22,6 +22,7 @@ class IsingModel2d{
         double magnetization(Mode mode);
         // setter function to change the block size once the object is already created
         void cuda_grid_size(int size){ cuda_block_size = size; };
+        void device_synchronize();
 
         
 

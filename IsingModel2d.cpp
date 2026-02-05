@@ -40,20 +40,22 @@ IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int see
 
     // Cuda allocation:
     allocate_cuda();
+    copy_to_device();
     upload_lookup_probs(); // Copy lookup tables
-    unsigned int cuda_seed = seed + 123; // different cuda seed
+    unsigned int cuda_seed = seed + 123; // different cuda seed 
+    // Initialize CUDA RNG states: computationally expensive, executed only once.
     launch_setup_rng(d_states, cuda_seed, L, row_stride);
 }
 
 
 /****************** DESTRUCTOR *********************/
 IsingModel2d::~IsingModel2d() {
+    // deallocate the memory used
     deallocate_cuda();
 }
 
 /***************** SYNC PADDING (ON HOST) **********/
 void IsingModel2d::sync_padding() {
-    // 
     for (int k = 1; k <= L; k++) {
         lattice[0 * row_stride + k] = lattice[L * row_stride + k];           // Top pad Row
         lattice[(L + 1) * row_stride + k] = lattice[1 * row_stride + k];     // Bottom pad Row
@@ -161,10 +163,29 @@ void IsingModel2d::deallocate_cuda() {
     gpu_free(d_lookup_probs);
 }
 
+void IsingModel2d::upload_lookup_probs(){
+    float host_lookup[10];
+    for (int i = 0; i < 2; i++){
+        for (int j = 0; j < 5; j++){
+            host_lookup[i*5 + j] = lookup_probs[i][j];
+        }
+    }
+
+    gpu_memcpy_to_device(d_lookup_probs,&host_lookup,sizeof(float) * 10);
+}
+
+void IsingModel2d::device_synchronize(){
+    launch_cuda_sync();
+}
+
 /****************** UPDATE STEP CUDA *********************/
 
 void IsingModel2d::step_cuda(){
+    // synchronize the padding
+    launch_sync_padding_gpu(d_lattice, L, row_stride);
+    // update even indices
     launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+    // update odd indices
     launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
 }
 
@@ -172,7 +193,7 @@ void IsingModel2d::step_cuda(){
 double IsingModel2d::magnetization(Mode mode) {
     double m = 0.0;
     
-    // 1. Serial Version
+    // Serial version
     if (mode == Mode::serial) {
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
@@ -181,7 +202,7 @@ double IsingModel2d::magnetization(Mode mode) {
         }
     }
     
-    // 2. Parallel OpenMP Version
+    // Parallel OpenMP version
     else if (mode == Mode::parallel_cpu) {
         #pragma omp parallel for collapse(2) reduction(+:m)
         for (int i = 1; i <= L; i++) {
@@ -189,6 +210,17 @@ double IsingModel2d::magnetization(Mode mode) {
                 m += lattice[i * row_stride + j];
             }
         }
+    }
+
+    // Parallel CUDA version
+
+    else if (mode == Mode::parallel_CUDA){
+        // note: we perform the reduction on the CPU to highlight the PCIe bottleneck.
+        // transfer data from GPU (VRAM) to Host (RAM)
+        // this copy_to_host() is the dominant cost for large lattices.
+        copy_to_host();
+        // compute magnetization on CPU
+        return magnetization(Mode::serial);
     }
     
     return m / (double)(L * L);
@@ -199,54 +231,91 @@ double IsingModel2d::magnetization(Mode mode) {
 double IsingModel2d::energy(Mode mode) {
     double E = 0.0;
     
+    // Serial version
     if (mode == Mode::serial){
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
                 int array_index = i * row_stride + j;
-                int neighbors = lattice[(i - 1) * row_stride + j] + lattice[(i + 1) * row_stride + j] + 
-                lattice[i * row_stride + (j - 1)] + lattice[i * row_stride + (j + 1)];
+                int neighbors = lattice[(i - 1) * row_stride + j] + //down
+                                lattice[(i + 1) * row_stride + j] + //up
+                                lattice[i * row_stride + (j - 1)] + //left
+                                lattice[i * row_stride + (j + 1)]; //right
+                
                 // Interaction energy (halved for double counting) + field energy
                 E += -0.5 * J * lattice[array_index] * neighbors - h * lattice[array_index];
             }
         }
     }
-    //parallel openMP
-
-    if (mode == Mode::parallel_cpu){
+    
+    // Parallel OpenMP version
+    else if (mode == Mode::parallel_cpu){
         #pragma omp parallel for collapse(2) reduction(+:E)
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
                 int array_index = i * row_stride + j;
-                int neighbors = lattice[(i - 1) * row_stride + j] + lattice[(i + 1) * row_stride + j] + 
-                lattice[i * row_stride + (j - 1)] + lattice[i * row_stride + (j + 1)];
+                int neighbors = lattice[(i - 1) * row_stride + j] + 
+                                lattice[(i + 1) * row_stride + j] + 
+                                lattice[i * row_stride + (j - 1)] + 
+                                lattice[i * row_stride + (j + 1)];
                 
-                // interaction energy (halved for double counting) + field energy
+                // Interaction energy (halved for double counting) + field energy
                 E += -0.5 * J * lattice[array_index] * neighbors - h * lattice[array_index];
             }
         }
     }
 
-    //parallel CUDA
-    /************/
+    // Parallel CUDA version
+    else if (mode == Mode::parallel_CUDA){
+        // note: we perform the reduction on the CPU to highlight the PCIe bottleneck.
+        // transfer data from GPU (VRAM) to Host (RAM)
+        // this copy_to_host() is the dominant cost for large lattices.
+        copy_to_host(); 
+        
+        // delegate the calculation to the CPU implementation
+        return energy(Mode::serial); 
+    }
 
-    
     return E;
 }
 
 /******* UPDATE STEP ********/
+
 void IsingModel2d::update(Mode mode, int steps) {
     switch(mode) {
+        
+        /****** SERIAL CPU EXECUTION ******/
         case Mode::serial:
             for (int i = 0; i < steps; i++) {
-                sync_padding();
+                // The serial step already includes sync_padding() internally
                 step_serial();
             }
             break;
-        /*case Mode::parallel_cpu:
+
+        /****** PARALLEL OPENMP EXECUTION *****/
+        
+        case Mode::parallel_cpu:
             for (int i = 0; i < steps; i++) {
+                // The OpenMP step already includes sync_padding() internally
                 step_openmp(); 
             }
             break;
-            */
+        
+        /****** PARALLEL CUDA EXECUTION *****/
+        case Mode::parallel_CUDA:
+            
+            // d_lattice must be already allocated and populated on the GPU.
+            // if this is the very first run, ensure copy_to_device() was called before.
+
+            for (int i = 0; i < steps; i++) {
+                // perform one full Monte Carlo step (Padding + Red + Black)
+                step_cuda(); 
+            }
+            
+            // wrapper for the threads synchronization
+            launch_cuda_sync();
+            
+            // note: We do NOT copy data back to Host here. 
+            
+            break;
     }
 }

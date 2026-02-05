@@ -1,40 +1,52 @@
 #include <iostream>
-#include <iomanip>
-#include "IsingModel2d.h"
+#include <string>
+#include <chrono>
+#include <vector>
+#include "IsingModel2d.h" 
 
-int main() {
-    // Parameters
-    int L = 10;           // 100x100 lattice
-    double T_high = 5.0;   // High temperature (Disordered)
-    double T_low = 1.0;    // Low temperature (Ordered)
-    double J = 1.0;
-    double h = 0.0;
-    unsigned int seed = 123;
-    int steps = 1000;      // Number of Monte Carlo steps
+int main(int argc, char* argv[]) {
+    // Ci aspettiamo: ./ising_sim <L> <Steps> <Temp> <Mode>
+    if (argc < 5) {
+        std::cerr << "Usage: ./ising_sim <L> <Steps> <Temp> <serial|omp|cuda>" << std::endl;
+        return 1;
+    }
 
-    std::cout << std::fixed << std::setprecision(4);
-    std::cout << "--- Testing Ising Model Serial Version ---" << std::endl;
+    int L = std::stoi(argv[1]);
+    int steps = std::stoi(argv[2]);
+    double T = std::stod(argv[3]);
+    std::string mode_str = argv[4];
 
-    // 1. Test High Temperature (Should stay disordered)
-    IsingModel2d model_high(L, T_high, J, h, seed);
-    std::cout << "\n[T = 5.0] Initial Magnetization: " << model_high.magnetization() << std::endl;
+    // --- CORREZIONE QUI SOTTO ---
+    // Uso "Mode" direttamente, senza IsingModel2d:: davanti
+    Mode mode;
+    if (mode_str == "serial") mode = Mode::serial;
+    else if (mode_str == "omp") mode = Mode::parallel_cpu;
+    else if (mode_str == "cuda") mode = Mode::parallel_CUDA;
+    else {
+        std::cerr << "Invalid mode!" << std::endl;
+        return 1;
+    }
+
+    // Inizializzazione
+    IsingModel2d model(L, T, 1.0, 0.0, 1234);
+
+    // Esecuzione e Timing
+    auto start = std::chrono::high_resolution_clock::now();
     
-    model_high.update(Mode::serial, steps);
+    model.update(mode, steps);
     
-    std::cout << "[T = 5.0] After " << steps << " steps: " << model_high.magnetization() << std::endl;
-    std::cout << "   (Expected: Should stay close to 0)" << std::endl;
+    // Sync per CUDA
+    if (mode == Mode::parallel_CUDA) model.device_synchronize();
 
-    // 2. Test Low Temperature (Should become ordered)
-    IsingModel2d model_low(L, T_low, J, h, seed);
-    std::cout << "\n[T = 1.0] Initial Magnetization: " << model_low.magnetization() << std::endl;
-    
-    model_low.update(Mode::serial, steps);
-    
-    std::cout << "[T = 1.0] After " << steps << " steps: " << model_low.magnetization() << std::endl;
-    std::cout << "   (Expected: Should increase toward 1.0)" << std::endl;
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
 
-    // 3. Test Energy Consistency
-    std::cout << "\nFinal Energy (T=1.0): " << model_low.energy() << std::endl;
+    // Calcolo osservabili
+    double mag = model.magnetization(mode);
+    double energy = model.energy(mode);
+
+    // Output per Python: TIME, MAGNETIZATION, ENERGY
+    std::cout << elapsed.count() << "," << mag << "," << energy << std::endl;
 
     return 0;
 }

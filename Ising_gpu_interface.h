@@ -12,5 +12,6 @@ void  gpu_memcpy_to_host(void* dest, const void* src, size_t size);
 void launch_setup_rng(void* d_states, unsigned int seed, int L, int row_stride);
 void launch_metropolis_step(int* d_lattice, int L, int row_stride, float* d_lookup_probs, int color, void* d_states, int block_size);
 void launch_sync_padding_gpu(int* d_lattice, int L, int row_stride);
+void launch_cuda_sync();
 
 #endif

@@ -17,12 +17,17 @@ class IsingModel2d{
         // destructor
         ~IsingModel2d();
 
+        int cuda_block_size = 16;
+        
+
         void update(Mode mode, int steps);
         double energy(Mode mode);
         double magnetization(Mode mode);
         // setter function to change the block size once the object is already created
         void cuda_grid_size(int size){ cuda_block_size = size; };
         void device_synchronize();
+
+
 
         
 
@@ -47,7 +52,6 @@ class IsingModel2d{
         double beta;
         double J = 1; // interaction term
         double h = 0; // magnetic field
-        int cuda_block_size = 16;
         // lookup table: this will be essentialy a probability grid to 
         // avoid computing exp every time
         float lookup_probs[2][5];

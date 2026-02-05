@@ -1,6 +1,11 @@
 #include "IsingModel2d.h"
 #include "Ising_gpu_interface.h"
 
+/* =====================================================================
+ * OBJECTS LIFECYCLE MANAGEMENT
+ * Handles initialization (Constructor) and cleanup (Destructor).
+ * Sets up the lattice, RNGs, lookup tables, and allocates device memory.
+ * ===================================================================== */
 
 /****************** CONSTRUCTOR *********************/
 IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int seed) : L(L), row_stride(L + 2), T(T), J(J), h(h), beta(1.0/T), serial_rng(seed) {
@@ -54,6 +59,11 @@ IsingModel2d::~IsingModel2d() {
     deallocate_cuda();
 }
 
+/* =====================================================================
+ * BOUNDARY CONDITIONS
+ * Manages ghost cells (padding) to enforce periodic boundary conditions.
+ * ===================================================================== */
+
 /***************** SYNC PADDING (ON HOST) **********/
 void IsingModel2d::sync_padding() {
     for (int k = 1; k <= L; k++) {
@@ -63,6 +73,11 @@ void IsingModel2d::sync_padding() {
         lattice[k * row_stride + (L + 1)] = lattice[k * row_stride + 1];     // Right pad Col
     }
 }
+
+/* =====================================================================
+ * PHYSICS STEP (HOST)
+ * The fundamental single-spin update logic used by CPU solvers.
+ * ===================================================================== */
 
 /****************** METROPOLIS RULE *********************/
 
@@ -83,6 +98,11 @@ void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
         lattice[array_index] *= -1;
     }
 }
+
+/* =====================================================================
+ * SOLVER IMPLEMENTATIONS
+ * specific algorithms for evolving the system (Serial, OpenMP, CUDA).
+ * ===================================================================== */
 
 /****************** UPDATE STEP SERIAL *********************/
 
@@ -136,6 +156,21 @@ void IsingModel2d::step_openmp(){
     } // End of parallel region
 }
 
+/****************** UPDATE STEP CUDA *********************/
+
+void IsingModel2d::step_cuda(){
+    // synchronize the padding
+    launch_sync_padding_gpu(d_lattice, L, row_stride);
+    // update even indices
+    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+    // update odd indices
+    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
+}
+
+/* =====================================================================
+ * MEMORY & DEVICE MANAGEMENT
+ * Handles data transfer between Host (RAM) and Device (VRAM).
+ * ===================================================================== */
 
 /******************* CUDA MEMORY HANDLING ***************/
 
@@ -178,16 +213,11 @@ void IsingModel2d::device_synchronize(){
     launch_cuda_sync();
 }
 
-/****************** UPDATE STEP CUDA *********************/
-
-void IsingModel2d::step_cuda(){
-    // synchronize the padding
-    launch_sync_padding_gpu(d_lattice, L, row_stride);
-    // update even indices
-    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
-    // update odd indices
-    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
-}
+/* =====================================================================
+ * OBSERVABLES & ANALYTICS
+ * Functions to calculate physical properties (Magnetization, Energy).
+ * Note: These usually run on Host after fetching data from Device.
+ * ===================================================================== */
 
 /*************** MAGNETIZATION ************************/
 double IsingModel2d::magnetization(Mode mode) {
@@ -277,6 +307,11 @@ double IsingModel2d::energy(Mode mode) {
 
     return E;
 }
+
+/* =====================================================================
+ * SIMULATION DRIVER
+ * The high-level interface to execute steps using the chosen backend.
+ * ===================================================================== */
 
 /******* UPDATE STEP ********/
 

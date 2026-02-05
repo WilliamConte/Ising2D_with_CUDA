@@ -76,7 +76,7 @@ void IsingModel2d::sync_padding() {
 
 /* =====================================================================
  * PHYSICS STEP (HOST)
- * The fundamental single-spin update logic used by CPU solvers.
+ * The single-spin update logic used by CPU solvers.
  * ===================================================================== */
 
 /****************** METROPOLIS RULE *********************/

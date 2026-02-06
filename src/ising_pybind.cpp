@@ -23,6 +23,8 @@ PYBIND11_MODULE(ising2d, m) {
         
         // Main methods
         .def("update", &IsingModel2d::update, py::arg("mode"), py::arg("steps"))
+        .def("copy_to_host", &IsingModel2d::copy_to_host)
+        .def("copy_to_device", &IsingModel2d::copy_to_device)
         .def("energy", &IsingModel2d::energy, py::arg("mode"))
         .def("magnetization", &IsingModel2d::magnetization, py::arg("mode"))
         .def("device_synchronize", &IsingModel2d::device_synchronize)

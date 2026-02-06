@@ -27,9 +27,9 @@ class IsingModel2d{
         void cuda_grid_size(int size){ cuda_block_size = size; };
         void device_synchronize();
 
-
-
-        
+        // device - host management
+        void copy_to_device();
+        void copy_to_host();
 
         /// Pybind functions ///
         // helper functions for Pybind11: in this way Python will read directly from the RAM without copying 
@@ -82,8 +82,6 @@ class IsingModel2d{
         // internal helpers for CUDA
         void allocate_cuda();
         void deallocate_cuda();
-        void copy_to_device();
-        void copy_to_host();
         void upload_lookup_probs();
 };
 

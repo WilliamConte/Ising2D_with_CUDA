@@ -194,10 +194,12 @@ void IsingModel2d::allocate_cuda() {
 }
 
 void IsingModel2d::copy_to_device() {
+    // it copties the lattice from host todevice
     gpu_memcpy_to_device(d_lattice, lattice.data(), lattice.size() * sizeof(int));
 }
 
 void IsingModel2d::copy_to_host() {
+    // it copties the lattice from device to host
     gpu_memcpy_to_host(lattice.data(), d_lattice, lattice.size() * sizeof(int));
 }
 
@@ -208,6 +210,7 @@ void IsingModel2d::deallocate_cuda() {
 }
 
 void IsingModel2d::upload_lookup_probs(){
+    // upload to device the lookup probability table
     float host_lookup[10];
     for (int i = 0; i < 2; i++){
         for (int j = 0; j < 5; j++){
@@ -254,8 +257,6 @@ double IsingModel2d::magnetization(Mode mode) {
     // Parallel CUDA version
 
     else if (mode == Mode::cuda_global || mode == Mode::cuda_shared){
-        // note: we perform the reduction on the CPU to highlight the PCIe bottleneck.
-        // transfer data from GPU (VRAM) to Host (RAM)
         // this copy_to_host() is the dominant cost for large lattices.
         copy_to_host();
         // compute magnetization on CPU

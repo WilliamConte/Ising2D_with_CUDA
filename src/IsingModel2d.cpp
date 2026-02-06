@@ -8,7 +8,7 @@
  * ===================================================================== */
 
 /****************** CONSTRUCTOR *********************/
-IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int seed) : L(L), row_stride(L + 2), T(T), J(J), h(h), beta(1.0/T), serial_rng(seed) {
+IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int seed) : L(L), row_stride(L + 2), T(T), beta(1.0/T), J(J), h(h), serial_rng(seed) {
     // initialize lattice with total size including padding
     lattice.resize(row_stride * row_stride); 
     
@@ -158,13 +158,22 @@ void IsingModel2d::step_openmp(){
 
 /****************** UPDATE STEP CUDA *********************/
 
-void IsingModel2d::step_cuda(){
+void IsingModel2d::step_cuda_global(){
     // synchronize the padding
     launch_sync_padding_gpu(d_lattice, L, row_stride);
     // update even indices
-    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+    launch_ising_global(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
     // update odd indices
-    launch_metropolis_step(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
+    launch_ising_global(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
+}
+
+void IsingModel2d::step_cuda_shared(){
+    // synchronize the padding
+    launch_sync_padding_gpu(d_lattice, L, row_stride);
+    // update even indices
+    launch_ising_shared(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+    // update odd indices
+    launch_ising_shared(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
 }
 
 /* =====================================================================
@@ -233,7 +242,7 @@ double IsingModel2d::magnetization(Mode mode) {
     }
     
     // Parallel OpenMP version
-    else if (mode == Mode::parallel_cpu) {
+    else if (mode == Mode::openMP) {
         #pragma omp parallel for collapse(2) reduction(+:m)
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
@@ -244,7 +253,7 @@ double IsingModel2d::magnetization(Mode mode) {
 
     // Parallel CUDA version
 
-    else if (mode == Mode::parallel_CUDA){
+    else if (mode == Mode::cuda_global || mode == Mode::cuda_shared){
         // note: we perform the reduction on the CPU to highlight the PCIe bottleneck.
         // transfer data from GPU (VRAM) to Host (RAM)
         // this copy_to_host() is the dominant cost for large lattices.
@@ -278,7 +287,7 @@ double IsingModel2d::energy(Mode mode) {
     }
     
     // Parallel OpenMP version
-    else if (mode == Mode::parallel_cpu){
+    else if (mode == Mode::openMP){
         #pragma omp parallel for collapse(2) reduction(+:E)
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
@@ -295,9 +304,7 @@ double IsingModel2d::energy(Mode mode) {
     }
 
     // Parallel CUDA version
-    else if (mode == Mode::parallel_CUDA){
-        // note: we perform the reduction on the CPU to highlight the PCIe bottleneck.
-        // transfer data from GPU (VRAM) to Host (RAM)
+    else if (mode == Mode::cuda_global || mode == Mode::cuda_shared){
         // this copy_to_host() is the dominant cost for large lattices.
         copy_to_host(); 
         
@@ -328,7 +335,7 @@ void IsingModel2d::update(Mode mode, int steps) {
 
         /****** PARALLEL OPENMP EXECUTION *****/
         
-        case Mode::parallel_cpu:
+        case Mode::openMP:
             for (int i = 0; i < steps; i++) {
                 // The OpenMP step already includes sync_padding() internally
                 step_openmp(); 
@@ -336,14 +343,31 @@ void IsingModel2d::update(Mode mode, int steps) {
             break;
         
         /****** PARALLEL CUDA EXECUTION *****/
-        case Mode::parallel_CUDA:
+        case Mode::cuda_global:
             
             // d_lattice must be already allocated and populated on the GPU.
             // if this is the very first run, ensure copy_to_device() was called before.
 
             for (int i = 0; i < steps; i++) {
                 // perform one full Monte Carlo step (Padding + Red + Black)
-                step_cuda(); 
+                step_cuda_global(); 
+            }
+            
+            // wrapper for the threads synchronization
+            launch_cuda_sync();
+            
+            // note: We do NOT copy data back to Host here.
+
+            break;
+        
+        case Mode::cuda_shared:
+            
+            // d_lattice must be already allocated and populated on the GPU.
+            // if this is the very first run, ensure copy_to_device() was called before.
+
+            for (int i = 0; i < steps; i++) {
+                // perform one full Monte Carlo step (Padding + Red + Black)
+                step_cuda_shared(); 
             }
             
             // wrapper for the threads synchronization

@@ -7,7 +7,7 @@
 #include <omp.h>
 
 // enum class to identify the type of algorithm implemented (done for readability)
-enum class Mode {serial, parallel_cpu, parallel_CUDA};
+enum class Mode {serial, openMP, cuda_global, cuda_shared};
 
 class IsingModel2d{
     public:
@@ -34,9 +34,12 @@ class IsingModel2d{
         /// Pybind functions ///
         // helper functions for Pybind11: in this way Python will read directly from the RAM without copying 
         // the lattice's data (expensive for large lattices)
-        int* get_data_ptr() { return lattice.data(); } // returns a pointer to where the lattice is stored in the RAM
+        // Skip the first row (row_stride) and the first column (+1)
+        int* get_data_ptr() { return lattice.data() + row_stride + 1; }
+        // The stride (jump) to the next row is 'row_stride' elements
+        std::vector<size_t> get_strides() { 
+            return { (size_t)row_stride * sizeof(int), sizeof(int) }; } // returns a pointer to where the lattice is stored in the RAM
         std::vector<size_t> get_shape() { return {(size_t)L, (size_t)L}; } // treat it as a 2d object
-        std::vector<size_t> get_strides() { return { (size_t)L * sizeof(int), sizeof(int) }; } // each element is an int
         
         // functions that allow to change thread counts from Python for plots
         void set_num_threads(int n) { omp_set_num_threads(n); }
@@ -72,7 +75,8 @@ class IsingModel2d{
         void sync_padding();
         void step_serial();
         void step_openmp();
-        void step_cuda();
+        void step_cuda_global();
+        void step_cuda_shared();
         void Metropolis_update(int i, int j, std::mt19937& rng);
 
         // internal helpers for CUDA

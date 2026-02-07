@@ -354,7 +354,7 @@ void IsingModel2d::update(Mode mode, int steps) {
                 step_cuda_global(); 
             }
             
-            // wrapper for the threads synchronization
+            // wrapper for the blocks synchronization
             launch_cuda_sync();
             
             // note: We do NOT copy data back to Host here.
@@ -371,7 +371,7 @@ void IsingModel2d::update(Mode mode, int steps) {
                 step_cuda_shared(); 
             }
             
-            // wrapper for the threads synchronization
+            // wrapper for the blocks synchronization
             launch_cuda_sync();
             
             // note: We do NOT copy data back to Host here. 

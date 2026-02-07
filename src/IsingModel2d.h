@@ -21,8 +21,8 @@ class IsingModel2d{
         
 
         void update(Mode mode, int steps);
-        double energy(Mode mode);
-        double magnetization(Mode mode);
+        double energy(Mode mode = Mode::serial);
+        double magnetization(Mode mode = Mode::serial);
         // setter function to change the block size once the object is already created
         void cuda_grid_size(int size){ cuda_block_size = size; };
         void device_synchronize();

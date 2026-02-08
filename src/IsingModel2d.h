@@ -23,13 +23,14 @@ class IsingModel2d{
         void update(Mode mode, int steps);
         double energy(Mode mode = Mode::serial);
         double magnetization(Mode mode = Mode::serial);
-        // setter function to change the block size once the object is already created
-        void cuda_grid_size(int size){ cuda_block_size = size; };
+        void set_T(double T_new);
+        
+        
+        // device - host management (+ OpenMP info)
         void device_synchronize();
-
-        // device - host management
         void copy_to_device();
         void copy_to_host();
+        int get_openmp_threads();
 
         /// Pybind functions ///
         // helper functions for Pybind11: in this way Python will read directly from the RAM without copying 
@@ -42,7 +43,7 @@ class IsingModel2d{
         std::vector<size_t> get_shape() { return {(size_t)L, (size_t)L}; } // treat it as a 2d object
         
         // functions that allow to change thread counts from Python for plots
-        void set_num_threads(int n) { omp_set_num_threads(n); }
+        void set_num_threads(int n); 
         void set_cuda_block_size(int s) { cuda_block_size = s; }
 
         
@@ -70,11 +71,12 @@ class IsingModel2d{
         // random Number Engines
         std::mt19937 serial_rng; 
         std::vector<std::mt19937> omp_rngs; // one number per thread to avoid race conditions
+        unsigned int m_seed;
 
         // internal logic
         void sync_padding();
         void step_serial();
-        void step_openmp();
+        void step_openmp(int steps);
         void step_cuda_global();
         void step_cuda_shared();
         void Metropolis_update(int i, int j, std::mt19937& rng);

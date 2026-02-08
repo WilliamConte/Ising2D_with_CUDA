@@ -8,7 +8,8 @@
  * ===================================================================== */
 
 /****************** CONSTRUCTOR *********************/
-IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int seed) : L(L), row_stride(L + 2), T(T), beta(1.0/T), J(J), h(h), serial_rng(seed) {
+IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int seed) : L(L), row_stride(L + 2), T(T), beta(1.0/T), J(J), h(h), serial_rng(seed),
+m_seed(seed) {
     // initialize lattice with total size including padding
     lattice.resize(row_stride * row_stride); 
     
@@ -27,7 +28,8 @@ IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int see
     for (int i = 0; i < max_threads; i++) {
         omp_rngs.emplace_back(seed + i + 1);
     }
-
+    // Compute lookup probabilities to determine spin flips during Metropolis updates.
+    // In this way we compute only once and we do only "read" operation in the following
     for (int s_idx = 0; s_idx < 2; ++s_idx) {
         // assign to index 0 the values of spin -1 and
         // to index 1 the values of spin +1
@@ -57,6 +59,36 @@ IsingModel2d::IsingModel2d(int L, double T, double J, double h, unsigned int see
 IsingModel2d::~IsingModel2d() {
     // deallocate the memory used
     deallocate_cuda();
+}
+
+/******** CHANGE TEMPERATURE OF THE OBJECT *******/
+void IsingModel2d::set_T(double T_new){
+    if (this->T == T_new) return;
+    else {
+        
+        // update the new attributes
+        this->T = T_new;
+        this->beta = 1.0/T_new;
+
+        // recompute the lookup probabilities
+        for (int s_idx = 0; s_idx < 2; ++s_idx) {
+        // assign to index 0 the values of spin -1 and
+        // to index 1 the values of spin +1
+        double s = (s_idx == 0) ? -1.0 : 1.0;
+        
+        // for a given spin value, store the probability of spin flip given the neighbors
+        for (int i = 0; i < 5; ++i) {
+            // Index mapping: index 0 is relative to value of neighbors -4 (i.e., all negative)
+            int physical_sum = (i * 2) - 4; // possible sum of neighbors is -4,-2,0,2,4
+            // compute delta E
+            double delta_E = 2.0 * s * (J * physical_sum + h);
+            lookup_probs[s_idx][i] = (delta_E > 0) ? std::exp(-delta_E * beta) : 1.0;
+            }
+    }
+
+    // Allocate also on device:
+    upload_lookup_probs();
+    }
 }
 
 /* =====================================================================
@@ -124,36 +156,50 @@ void IsingModel2d::step_serial() {
 
 /****************** UPDATE STEP OPENMP *********************/
 
-void IsingModel2d::step_openmp(){
-    sync_padding();
+void IsingModel2d::step_openmp(int steps) {
     
-    // start parallel region
+    sync_padding();
+    // Start the parallel region once,
+    // Threads are created here and stay alive for all 'steps'.
     #pragma omp parallel 
     {
-        // assign threads indices
-        int thread_index = omp_get_thread_num();
-        std::mt19937& thread_rng = omp_rngs[thread_index]; 
-        
-        // update even indices
-        #pragma omp for collapse(2)
-        for(int i = 1; i <= L; i++){
-            for(int j = 1; j <= L; j++){
-                if ((i+j) % 2 == 0){
-                    Metropolis_update(i, j, thread_rng);
+        // each thread gets its own unique ID and private RNG state.
+        int thread_id = omp_get_thread_num();
+        std::mt19937& thread_rng = omp_rngs[thread_id]; 
+
+        // time Loop INSIDE the parallel region
+        for (int s = 0; s < steps; s++) {
+            
+            // even spins
+            #pragma omp for collapse(2) 
+            for(int i = 1; i <= L; i++){
+                for(int j = 1; j <= L; j++){
+                    // Checkerboard condition for Even (Red) sites
+                    if ((i + j) % 2 == 0) {
+                        Metropolis_update(i, j, thread_rng);
+                    }
                 }
             }
-        }
-        
-        // update the odd indices
-        #pragma omp for collapse(2)
-        for(int i = 1; i <= L; i++){
-            for(int j = 1; j <= L; j++){
-                if ((i+j) % 2 != 0){
-                    Metropolis_update(i, j, thread_rng);
+            
+            // odd spins
+            #pragma omp for collapse(2)
+            for(int i = 1; i <= L; i++){
+                for(int j = 1; j <= L; j++){
+                    // Checkerboard condition for Odd (Black) sites
+                    if ((i + j) % 2 != 0) {
+                        Metropolis_update(i, j, thread_rng);
+                    }
                 }
             }
-        }
-    } // End of parallel region
+            
+            //synch padding
+            #pragma omp single
+            {
+                sync_padding();
+            }
+            
+        } // End of time loop
+    } // End of parallel region (Threads are destroyed here)
 }
 
 /****************** UPDATE STEP CUDA *********************/
@@ -223,6 +269,22 @@ void IsingModel2d::upload_lookup_probs(){
 
 void IsingModel2d::device_synchronize(){
     launch_cuda_sync();
+}
+
+/*OpenMP function to get the number of threads*/
+int IsingModel2d::get_openmp_threads(){
+    return omp_get_max_threads();
+}
+
+void IsingModel2d::set_num_threads(int n) { 
+    omp_set_num_threads(n); 
+    
+    if (n > (int)omp_rngs.size()) {
+        int current_size = omp_rngs.size();
+        for (int i = current_size; i < n; i++) {
+            omp_rngs.emplace_back(m_seed + i + 1);
+        }
+    }
 }
 
 /* =====================================================================
@@ -337,10 +399,7 @@ void IsingModel2d::update(Mode mode, int steps) {
         /****** PARALLEL OPENMP EXECUTION *****/
         
         case Mode::openMP:
-            for (int i = 0; i < steps; i++) {
-                // The OpenMP step already includes sync_padding() internally
-                step_openmp(); 
-            }
+            step_openmp(steps); 
             break;
         
         /****** PARALLEL CUDA EXECUTION *****/

@@ -6,7 +6,7 @@
 #include "Ising_gpu_interface.h"
 
 // ==========================================
-// MEMORY HANDLING
+// MEMORY HANDLING (WRAPPERS)
 // ==========================================
 
 void* gpu_alloc(size_t size) {
@@ -38,6 +38,12 @@ __global__ void setup_rand_kernel(curandState* states, unsigned int seed, int L,
 
     if (x <= L && y <= L) {
         int index = y * row_stride + x;
+
+        // itialize each thread with a Curandstate:
+        // - seed: global starting point
+        // - index: sequence number to ensure independent, non-overlapping random sequences
+        // - 0: initial subsequence offset
+        // - states[index]: destination in global memory for this thread's state
         curand_init(seed, index, 0, &states[index]);
     }
 }
@@ -60,7 +66,7 @@ __global__ void sync_padding_kernel(int* lattice, int L, int row_stride) {
 // ==========================================
 
 /**
- * VERSION 1: GLOBAL MEMORY (NAIVE)
+ * VERSION 1: GLOBAL MEMORY
  * Each thread reads its neighbors directly from Global Memory (VRAM).
  * This version is used as a baseline for performance benchmarking.
  */
@@ -72,16 +78,17 @@ __global__ void ising_step_global(int* lattice, int L, int row_stride, float* lo
     // Boundary check: ensure the thread is within the LxL lattice
     if (thread_x <= L && thread_y <= L) {
         
-        // Checkerboard (Red-Black) update logic
-        // Only threads matching the current 'color' update during this pass
+        // Checkerboard update logic
+        // Only threads matching the current type are updated during this pass
+        // Here we used color becuse in general there is the map:
+        // even --> red | odd --> black
+
         if ((thread_x + thread_y) % 2 == color) {
             int global_index = thread_y * row_stride + thread_x;
             int current_spin = lattice[global_index];
 
-            /**
-             * Direct Global Memory Access:
-             * Every neighbor read travels through the L2 cache/VRAM bus.
-             */
+            
+            /* direct Global Memory Access:*/
             int sum_neighbors = lattice[(thread_y - 1) * row_stride + thread_x] + // Top neighbor
                                 lattice[(thread_y + 1) * row_stride + thread_x] + // Bottom neighbor
                                 lattice[thread_y * row_stride + (thread_x - 1)] + // Left neighbor
@@ -107,10 +114,9 @@ __global__ void ising_step_global(int* lattice, int L, int row_stride, float* lo
  * VERSION 2: SHARED MEMORY + L2 CACHE
  * * This implementation uses a hybrid memory strategy:
  * 1. Shared Memory (L1): Used for high-speed access to spins within the block.
- * 2. L2 Cache (__ldg): Used to fetch 'padding' (boundary) spins from neighboring 
+ * 2. L2 Cache (__ldg): Used to fetch the boundary spins from neighboring 
  * blocks via the Read-Only Data Cache, reducing Global Memory latency.
- * * Templates are used to define BLOCK_SIZE at compile-time, allowing the compiler 
- * to optimize register allocation and static shared memory partitioning.
+ * Templates are used to define BLOCK_SIZE at compile-time.
  */
 
 template <int BLOCK_SIZE>
@@ -148,13 +154,11 @@ __global__ void ising_step_shared(int* lattice, int L, int row_stride, float* lo
              * -) INNER (Shared Memory): 
              * Serves the reads from L1. Zero latency, no VRAM traffic.
              *
-             * -) PADDING (__ldg): 
+             * -) BOUNDARY (__ldg): 
              * Serves boundaries via the Read-Only Cache (Texture Unit).
-             * - Bypasses L1 coherency protocols for static data.
-             * - Hits the L2 cache efficiently (high spatial locality).
-             * - Prevents "warp divergence" penalties of complex loading schemes. */
+             */
 
-            // left Neighbor
+            // left neighbor
             if (thread_x > 0) {
                 sum_n += my_cache[thread_y][thread_x - 1];
             }
@@ -162,7 +166,7 @@ __global__ void ising_step_shared(int* lattice, int L, int row_stride, float* lo
                 sum_n += __ldg(&lattice[global_index - 1]);
             }
 
-            // right Neighbor
+            // right neighbor
             if (thread_x < BLOCK_SIZE - 1){
                 sum_n += my_cache[thread_y][thread_x + 1];
             } 
@@ -170,7 +174,7 @@ __global__ void ising_step_shared(int* lattice, int L, int row_stride, float* lo
                 sum_n += __ldg(&lattice[global_index + 1]);
             }
 
-            // up Neighbor
+            // up neighbor
             if (thread_y > 0){
                 sum_n += my_cache[thread_y - 1][thread_x];
             } 
@@ -178,7 +182,7 @@ __global__ void ising_step_shared(int* lattice, int L, int row_stride, float* lo
                 sum_n += __ldg(&lattice[global_index - row_stride]);
             }        
             
-            // down Neighbor
+            // down neighbor
             if (thread_y < BLOCK_SIZE - 1){
                 sum_n += my_cache[thread_y + 1][thread_x];
             } 
@@ -186,12 +190,17 @@ __global__ void ising_step_shared(int* lattice, int L, int row_stride, float* lo
                 sum_n += __ldg(&lattice[global_index + row_stride]);
             }                   
             
-            // Metropolis update
+            // Metropolis update by the means of the lookup table
+            // (allocated in the device within the constructor)
             int lookup_index_0 = (current_spin == -1) ? 0 : 1;
             int lookup_index_1 = (sum_n + 4) / 2;
 
+            // Generate a random float (0, 1] using the thread-specific state
+            // Each thread has a unique sequence offset to ensure statistical independence 
+            // and eliminate race conditions on the generator state.
             float rand_val = curand_uniform(&states[global_index]);
 
+            // Metropolis condition
             if (rand_val < lookup_probs[lookup_index_0 * 5 + lookup_index_1]) {
                 lattice[global_index] = -current_spin;
             }
@@ -207,6 +216,7 @@ __global__ void ising_step_shared(int* lattice, int L, int row_stride, float* lo
 void launch_setup_rng(void* d_states, unsigned int seed, int L, int row_stride) {
     curandState* states = (curandState*)d_states;
 
+    // fixed block size here
     dim3 block(16, 16);
     dim3 grid((L + block.x - 1) / block.x, (L + block.y - 1) / block.y);
 
@@ -216,7 +226,8 @@ void launch_setup_rng(void* d_states, unsigned int seed, int L, int row_stride) 
 }
 
 void launch_sync_padding_gpu(int* d_lattice, int L, int row_stride) {
-    // use fixed number of threads for padding.
+    
+    // use fixed number of threads for padding
     int threads = 256; 
     int grid = (L + threads - 1) / threads;
     
@@ -226,7 +237,7 @@ void launch_sync_padding_gpu(int* d_lattice, int L, int row_stride) {
 
 
 void launch_ising_shared(int* d_lattice, int L, int row_stride, float* d_lookup_probs, int color, void* d_states, int block_size) {
-    // cast to the correct type
+    // cast to the correct type (so g++ does not raise errors)
     curandState* states = (curandState*)d_states;
 
     dim3 block(block_size, block_size);
@@ -250,6 +261,9 @@ void launch_ising_shared(int* d_lattice, int L, int row_stride, float* d_lookup_
 }
 
 void launch_ising_global(int* d_lattice, int L, int row_stride, float* d_lookup_probs, int color, void* d_states, int block_size){
+     /*Wrapper to launch 'global' algorithm*/
+
+    // cast to the correct type (so g++ does not raise errors) 
     curandState* states = (curandState*) d_states;
     if (block_size > 32){
         std::cout << "It is not possible to have a block size of "<< block_size <<" --> casted to 32" << std::endl;
@@ -263,5 +277,6 @@ void launch_ising_global(int* d_lattice, int L, int row_stride, float* d_lookup_
 }
 
 void launch_cuda_sync(){
+    /*Wrapper to synchronize blocks*/
     cudaDeviceSynchronize();
 }

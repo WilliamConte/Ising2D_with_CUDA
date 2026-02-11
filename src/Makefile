@@ -21,7 +21,6 @@ NVCCFLAGS = -O3 -shared -arch=sm_89 \
 
 # SOURCE FILES
 # Here we include ALL files required to build the Python library.
-# We exclude main.cpp because ising_pybind.cpp is used as the entry point for Python.
 SRCS = main_wrapper.cu
 
 all: $(LIB_NAME)$(PY_SUFFIX)

@@ -28,8 +28,10 @@ m_seed(seed) {
     for (int i = 0; i < max_threads; i++) {
         omp_rngs.emplace_back(seed + i + 1);
     }
+
     // Compute lookup probabilities to determine spin flips during Metropolis updates.
-    // In this way we compute only once and we do only "read" operation in the following
+    // In this way we compute only once and we do only "read" operation in the following,
+    // which are more efficient than compute an exponential function at each step
     for (int s_idx = 0; s_idx < 2; ++s_idx) {
         // assign to index 0 the values of spin -1 and
         // to index 1 the values of spin +1
@@ -39,8 +41,13 @@ m_seed(seed) {
         for (int i = 0; i < 5; ++i) {
             // Index mapping: index 0 is relative to value of neighbors -4 (i.e., all negative)
             int physical_sum = (i * 2) - 4; // possible sum of neighbors is -4,-2,0,2,4
+            // Globally we have this inidex mapping: (sum_neighbors --> index_lookup_table)
+            // -4 --> 0 | -2 --> 1 | 0 --> 2 | 2 --> 3 | 4 --> 3
+            
             // compute delta E
             double delta_E = 2.0 * s * (J * physical_sum + h);
+
+            // assign to each position in the lookup prob the correspondent acceptance probability
             lookup_probs[s_idx][i] = (delta_E > 0) ? std::exp(-delta_E * beta) : 1.0;
             }
     }
@@ -49,8 +56,8 @@ m_seed(seed) {
     allocate_cuda();
     copy_to_device();
     upload_lookup_probs(); // Copy lookup tables
-    unsigned int cuda_seed = seed + 123; // different cuda seed 
-    // Initialize CUDA RNG states: computationally expensive, executed only once.
+    unsigned int cuda_seed = seed + 123; 
+    // Initialize cud rng states: computationally expensive, executed only once.
     launch_setup_rng(d_states, cuda_seed, L, row_stride);
 }
 
@@ -93,7 +100,12 @@ void IsingModel2d::set_T(double T_new){
 
 /* =====================================================================
  * BOUNDARY CONDITIONS
- * Manages ghost cells (padding) to enforce periodic boundary conditions.
+ * We decided to use a padding to ensure boundary conditions. This functions
+ * manages ghost cells (padding) to enforce periodic boundary conditions, in particular:
+ * - Top row is copied to the Bottom padding layer
+ * - Bottom row is copied to the Top padding layer
+ * - Left column is copied to the Right padding layer
+ * - Right column is copied to the Left padding layer
  * ===================================================================== */
 
 /***************** SYNC PADDING (ON HOST) **********/
@@ -114,16 +126,19 @@ void IsingModel2d::sync_padding() {
 /****************** METROPOLIS RULE *********************/
 
 void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
+    // identify the index of the spin
     int array_index = i * row_stride + j;
+    // sum its neighbors
     int neighbors = lattice[(i - 1) * row_stride + j] + 
                     lattice[(i + 1) * row_stride + j] + 
                     lattice[i * row_stride + (j - 1)] + 
                     lattice[i * row_stride + (j + 1)];
 
+    // identify the position in the lookup probability table
     int spin_idx = (lattice[array_index] == -1) ? 0 : 1;
     int sum_idx = (neighbors + 4) / 2;
 
-    // We need a distribution instance locally or as a member
+    // We need a distribution instance:
     std::uniform_real_distribution<double> dist(0.0, 1.0);
 
     if (dist(rng) < lookup_probs[spin_idx][sum_idx]) {
@@ -159,22 +174,22 @@ void IsingModel2d::step_serial() {
 void IsingModel2d::step_openmp(int steps) {
     
     sync_padding();
-    // Start the parallel region once,
-    // Threads are created here and stay alive for all 'steps'.
+    
+    // Threads are created here and stay alive for all simulation
     #pragma omp parallel 
     {
-        // each thread gets its own unique ID and private RNG state.
+        // each thread gets its own unique ID and private RNG state
         int thread_id = omp_get_thread_num();
         std::mt19937& thread_rng = omp_rngs[thread_id]; 
 
-        // time Loop INSIDE the parallel region
+        // time loop
         for (int s = 0; s < steps; s++) {
             
             // even spins
             #pragma omp for collapse(2) 
             for(int i = 1; i <= L; i++){
                 for(int j = 1; j <= L; j++){
-                    // Checkerboard condition for Even (Red) sites
+                    // Checkerboard condition for even sites
                     if ((i + j) % 2 == 0) {
                         Metropolis_update(i, j, thread_rng);
                     }
@@ -185,7 +200,7 @@ void IsingModel2d::step_openmp(int steps) {
             #pragma omp for collapse(2)
             for(int i = 1; i <= L; i++){
                 for(int j = 1; j <= L; j++){
-                    // Checkerboard condition for Odd (Black) sites
+                    // Checkerboard condition for odd sites
                     if ((i + j) % 2 != 0) {
                         Metropolis_update(i, j, thread_rng);
                     }
@@ -198,8 +213,8 @@ void IsingModel2d::step_openmp(int steps) {
                 sync_padding();
             }
             
-        } // End of time loop
-    } // End of parallel region (Threads are destroyed here)
+        } // end of time loop
+    } // end of parallel region (threads are destroyed here)
 }
 
 /****************** UPDATE STEP CUDA *********************/
@@ -234,13 +249,14 @@ void IsingModel2d::allocate_cuda() {
     size_t lattice_bytes = row_stride * row_stride * sizeof(int);
     size_t states_bytes = row_stride * row_stride * 70; // excess CuRand state dimension estimation
 
+    // allocate lattice, curandstates and lookup table
     d_lattice = (int*)gpu_alloc(lattice_bytes);
     d_states = gpu_alloc(states_bytes);
     d_lookup_probs = (float*)gpu_alloc(10 * sizeof(float));
 }
 
 void IsingModel2d::copy_to_device() {
-    // it copties the lattice from host todevice
+    // it copies the lattice from host to device
     gpu_memcpy_to_device(d_lattice, lattice.data(), lattice.size() * sizeof(int));
 }
 
@@ -250,6 +266,7 @@ void IsingModel2d::copy_to_host() {
 }
 
 void IsingModel2d::deallocate_cuda() {
+    // free the memory 
     gpu_free(d_lattice);
     gpu_free(d_states);
     gpu_free(d_lookup_probs);
@@ -277,6 +294,8 @@ int IsingModel2d::get_openmp_threads(){
 }
 
 void IsingModel2d::set_num_threads(int n) { 
+    // change number of threads used in openMP
+    // (useful for benchmarking)
     omp_set_num_threads(n); 
     
     if (n > (int)omp_rngs.size()) {
@@ -319,7 +338,7 @@ double IsingModel2d::magnetization(Mode mode) {
     // Parallel CUDA version
 
     else if (mode == Mode::cuda_global || mode == Mode::cuda_shared){
-        // this copy_to_host() is the dominant cost for large lattices.
+        // this copy_to_host() is the dominant cost for large lattices
         copy_to_host();
         // compute magnetization on CPU
         return magnetization(Mode::serial);

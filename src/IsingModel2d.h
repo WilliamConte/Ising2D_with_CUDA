@@ -17,9 +17,10 @@ class IsingModel2d{
         // destructor
         ~IsingModel2d();
 
-        int cuda_block_size = 16;
-        
+        // default cuda block size (only one side)
+        int cuda_block_size = 16;  
 
+        // public methods "physics"-related
         void update(Mode mode, int steps);
         double energy(Mode mode = Mode::serial);
         double magnetization(Mode mode = Mode::serial);
@@ -51,9 +52,9 @@ class IsingModel2d{
     private:
         
         int L;
-        int row_stride;
+        int row_stride; // is equal to L + 2, because it includes the padding
         double T;
-        double beta;
+        double beta; // = 1/T
         double J = 1; // interaction term
         double h = 0; // magnetic field
         // lookup table: this will be essentialy a probability grid to 
@@ -63,12 +64,13 @@ class IsingModel2d{
         // CUDA Device Pointers
         int* d_lattice = nullptr;
         float* d_lookup_probs = nullptr;
+        // Pointer to a curandStande which is on the device
         void* d_states = nullptr; // void* to hide curandState to g++
 
         // lattice is already flattened in 1D vector for simplicity on next phases 
         std::vector<int> lattice;
 
-        // random Number Engines
+        // random number generators 
         std::mt19937 serial_rng; 
         std::vector<std::mt19937> omp_rngs; // one number per thread to avoid race conditions
         unsigned int m_seed;

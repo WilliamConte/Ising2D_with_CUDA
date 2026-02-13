@@ -195,6 +195,11 @@ void IsingModel2d::step_openmp(int steps) {
                     }
                 }
             }
+
+            #pragma omp single
+            {
+                sync_padding();
+            }
             
             // odd spins
             #pragma omp for collapse(2)
@@ -224,6 +229,8 @@ void IsingModel2d::step_cuda_global(){
     launch_sync_padding_gpu(d_lattice, L, row_stride);
     // update even indices
     launch_ising_global(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+
+    launch_sync_padding_gpu(d_lattice, L, row_stride);
     // update odd indices
     launch_ising_global(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
 }
@@ -233,6 +240,8 @@ void IsingModel2d::step_cuda_shared(){
     launch_sync_padding_gpu(d_lattice, L, row_stride);
     // update even indices
     launch_ising_shared(d_lattice, L, row_stride, d_lookup_probs, 0, d_states, cuda_block_size);
+
+    launch_sync_padding_gpu(d_lattice, L, row_stride);
     // update odd indices
     launch_ising_shared(d_lattice, L, row_stride, d_lookup_probs, 1, d_states, cuda_block_size);
 }

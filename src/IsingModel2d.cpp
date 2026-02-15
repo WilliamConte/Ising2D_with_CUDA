@@ -41,7 +41,7 @@ m_seed(seed) {
         for (int i = 0; i < 5; ++i) {
             // Index mapping: index 0 is relative to value of neighbors -4 (i.e., all negative)
             int physical_sum = (i * 2) - 4; // possible sum of neighbors is -4,-2,0,2,4
-            // Globally we have this inidex mapping: (sum_neighbors --> index_lookup_table)
+            // Globally we have this index mapping: (sum_neighbors --> index_lookup_table)
             // -4 --> 0 | -2 --> 1 | 0 --> 2 | 2 --> 3 | 4 --> 3
             
             // compute delta E
@@ -277,7 +277,7 @@ void IsingModel2d::step_cuda_shared(){
 // allocate memory on device 
 void IsingModel2d::allocate_cuda() {
     size_t lattice_bytes = row_stride * row_stride * sizeof(int);
-    size_t states_bytes = row_stride * row_stride * 70; // excess CuRand state dimension estimation
+    size_t states_bytes = row_stride * row_stride * 70; // conservative CuRand state dimension estimation
 
     // allocate lattice, curandstates and lookup table
     d_lattice = (int*)gpu_alloc(lattice_bytes);
@@ -291,7 +291,7 @@ void IsingModel2d::copy_to_device() {
 }
 
 void IsingModel2d::copy_to_host() {
-    // it copties the lattice from device to host
+    // it copies the lattice from device to host
     gpu_memcpy_to_host(lattice.data(), d_lattice, lattice.size() * sizeof(int));
 }
 

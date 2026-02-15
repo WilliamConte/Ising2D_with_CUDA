@@ -100,12 +100,16 @@ void IsingModel2d::set_T(double T_new){
 
 /* =====================================================================
  * BOUNDARY CONDITIONS
- * We decided to use a padding to ensure boundary conditions. This functions
+ * Originally we decided to use a padding to ensure boundary conditions both on CPU
+ * and GPU. In particular, on CPU we used the function ''sync_padding''. This functions
  * manages ghost cells (padding) to enforce periodic boundary conditions, in particular:
  * - Top row is copied to the Bottom padding layer
  * - Bottom row is copied to the Top padding layer
  * - Left column is copied to the Right padding layer
  * - Right column is copied to the Left padding layer
+ * But in the end this strategy was not used on CPU, we used a simpler ternary operator,
+ * which is more efficient in this context. We maintain this function just for completeness.
+ * On GPU, instead, we used that strategy (The detailed implementations are in "ising_CUDA_kernels.cu")
  * ===================================================================== */
 
 /***************** SYNC PADDING (ON HOST) **********/
@@ -142,13 +146,13 @@ void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
     // Identify Neighbor Indices using Periodic Boundary Conditions (PBC).
     // check if we are on a boundary (1 or L) and "wrap around" explicitly.
     
-    //    If i is 1 (top row), the neighbor above is L (bottom row). Else i-1.
+    // if i is 1 (top row), the neighbor above is L (bottom row). Else i-1.
     int i_up    = (i == 1) ? L : i - 1;   
-    //    If i is L (bottom row), the neighbor below is 1 (top row). Else i+1.
+    // if i is L (bottom row), the neighbor below is 1 (top row). Else i+1.
     int i_down  = (i == L) ? 1 : i + 1;   
-    //    If j is 1 (left col), the neighbor left is L (right col). Else j-1.
+    // if j is 1 (left col), the neighbor left is L (right col). Else j-1.
     int j_left  = (j == 1) ? L : j - 1;   
-    //    If j is L (right col), the neighbor right is 1 (left col). Else j+1.
+    // if j is L (right col), the neighbor right is 1 (left col). Else j+1.
     int j_right = (j == L) ? 1 : j + 1;   
     // Sum the neighbors by reading directly from the real lattice locations.
     int neighbors = lattice[i_up   * row_stride + j] + 
@@ -364,7 +368,7 @@ double IsingModel2d::magnetization(Mode mode) {
     // Parallel CUDA version
 
     else if (mode == Mode::cuda_global || mode == Mode::cuda_shared){
-        // this copy_to_host() is the dominant cost for large lattices
+        // this ''copy_to_host()'' is the dominant cost for large lattices
         copy_to_host();
         // compute magnetization on CPU
         return magnetization(Mode::serial);

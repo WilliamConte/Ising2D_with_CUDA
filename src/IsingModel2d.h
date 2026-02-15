@@ -20,7 +20,7 @@ class IsingModel2d{
         // default cuda block size (only one side)
         int cuda_block_size = 16;  
 
-        // public methods "physics"-related
+        // public methods "physics"- related
         void update(Mode mode, int steps);
         double energy(Mode mode = Mode::serial);
         double magnetization(Mode mode = Mode::serial);
@@ -39,8 +39,8 @@ class IsingModel2d{
         // Skip the first row (row_stride) and the first column (+1)
         int* get_data_ptr() { return lattice.data() + row_stride + 1; }
         // The stride (jump) to the next row is 'row_stride' elements
-        std::vector<size_t> get_strides() { 
-            return { (size_t)row_stride * sizeof(int), sizeof(int) }; } // returns a pointer to where the lattice is stored in the RAM
+        std::vector<size_t> get_strides() { return { (size_t)row_stride * sizeof(int), sizeof(int) }; } // returns a pointer 
+        // to where the lattice is stored in the RAM
         std::vector<size_t> get_shape() { return {(size_t)L, (size_t)L}; } // treat it as a 2d object
         
         // functions that allow to change thread counts from Python for plots
@@ -65,9 +65,9 @@ class IsingModel2d{
         int* d_lattice = nullptr;
         float* d_lookup_probs = nullptr;
         // Pointer to a curandStande which is on the device
-        void* d_states = nullptr; // void* to hide curandState to g++
+        void* d_states = nullptr; // void* to hide curandState type to g++
 
-        // lattice is already flattened in 1D vector for simplicity on next phases 
+        // lattice is already flattened in 1D vector (row-major) for memory efficiency 
         std::vector<int> lattice;
 
         // random number generators 
@@ -81,7 +81,7 @@ class IsingModel2d{
         void step_openmp(int steps);
         void step_cuda_global();
         void step_cuda_shared();
-        void Metropolis_update(int i, int j, std::mt19937& rng);
+        void Metropolis_update(int i, int j, std::mt19937& rng); // single Metropolis step
 
         // internal helpers for CUDA
         void allocate_cuda();

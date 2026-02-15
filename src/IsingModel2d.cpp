@@ -31,7 +31,7 @@ m_seed(seed) {
 
     // Compute lookup probabilities to determine spin flips during Metropolis updates.
     // In this way we compute only once and we do only "read" operation in the following,
-    // which are more efficient than compute an exponential function at each step
+    // which are more efficient than computing an exponential function at each step
     for (int s_idx = 0; s_idx < 2; ++s_idx) {
         // assign to index 0 the values of spin -1 and
         // to index 1 the values of spin +1
@@ -109,6 +109,9 @@ void IsingModel2d::set_T(double T_new){
  * ===================================================================== */
 
 /***************** SYNC PADDING (ON HOST) **********/
+/*Note: in the final implementation this function is not used in the CPU, since read/copy 
+from the RAM is less efficient than if-else operations.*/
+
 void IsingModel2d::sync_padding() {
     for (int k = 1; k <= L; k++) {
         lattice[0 * row_stride + k] = lattice[L * row_stride + k];           // Top pad Row
@@ -118,31 +121,56 @@ void IsingModel2d::sync_padding() {
     }
 }
 
+
 /* =====================================================================
- * PHYSICS STEP (HOST)
- * The single-spin update logic used by CPU solvers.
+ * METROPOLIS UPDATE (Optimized for CPU: Serial & OpenMP)
+ * * This function attempts to flip a single spin at coordinates (i, j).
+ * * Difference from GPU version:
+ * it does not rely on "Ghost Cells" (padding) to find neighbors.
+ * Instead, it uses branching to handle 
+ * Periodic Boundary Conditions (PBC) on the fly.
+ * This allows us not to use the expensive ''sync_padding()'' calls 
+ * from the Serial and OpenMP loops, as we read directly from the 
+ * real lattice data.
  * ===================================================================== */
 
-/****************** METROPOLIS RULE *********************/
-
 void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
-    // identify the index of the spin
-    int array_index = i * row_stride + j;
-    // sum its neighbors
-    int neighbors = lattice[(i - 1) * row_stride + j] + 
-                    lattice[(i + 1) * row_stride + j] + 
-                    lattice[i * row_stride + (j - 1)] + 
-                    lattice[i * row_stride + (j + 1)];
+    
+    // Identify the 1D index of the spin we are trying to flip
+    int current_idx = i * row_stride + j;
 
-    // identify the position in the lookup probability table
-    int spin_idx = (lattice[array_index] == -1) ? 0 : 1;
-    int sum_idx = (neighbors + 4) / 2;
+    // Identify Neighbor Indices using Periodic Boundary Conditions (PBC).
+    // check if we are on a boundary (1 or L) and "wrap around" explicitly.
+    
+    //    If i is 1 (top row), the neighbor above is L (bottom row). Else i-1.
+    int i_up    = (i == 1) ? L : i - 1;   
+    //    If i is L (bottom row), the neighbor below is 1 (top row). Else i+1.
+    int i_down  = (i == L) ? 1 : i + 1;   
+    //    If j is 1 (left col), the neighbor left is L (right col). Else j-1.
+    int j_left  = (j == 1) ? L : j - 1;   
+    //    If j is L (right col), the neighbor right is 1 (left col). Else j+1.
+    int j_right = (j == L) ? 1 : j + 1;   
+    // Sum the neighbors by reading directly from the real lattice locations.
+    int neighbors = lattice[i_up   * row_stride + j] + 
+                    lattice[i_down * row_stride + j] + 
+                    lattice[i * row_stride + j_left] + 
+                    lattice[i * row_stride + j_right];
 
-    // We need a distribution instance:
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    // Calculate Energy Change (Delta E) via Lookup Table
+    // map the current spin (-1 or 1) to a table index (0 or 1)
+    int spin_val = lattice[current_idx];
+    int spin_idx = (spin_val < 0) ? 0 : 1; 
+    
+    // map the neighbor sum (-4, -2, 0, 2, 4) to a table index (0, 1, 2, 3, 4)
+    int sum_idx  = (neighbors + 4) / 2;
 
+    // use a static distribution to avoid the overhead of reconstructing 
+    // the object at every single function call
+    static std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+    // check the probability against the pre-computed lookup table.
     if (dist(rng) < lookup_probs[spin_idx][sum_idx]) {
-        lattice[array_index] *= -1;
+        lattice[current_idx] *= -1; // Flip the spin
     }
 }
 
@@ -155,10 +183,10 @@ void IsingModel2d::Metropolis_update(int i, int j, std::mt19937& rng) {
 
 void IsingModel2d::step_serial() {
     //synchronize the padding 
-    sync_padding();
+    //sync_padding(); not useful on CPU
 
-    std::uniform_int_distribution<int> index_dist(1, L);
-    std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
+    static std::uniform_int_distribution<int> index_dist(1, L);
+    static std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
 
     // perform L*L flip attempts (this is one step)
     for (int n = 0; n < L * L; n++) {
@@ -173,7 +201,7 @@ void IsingModel2d::step_serial() {
 
 void IsingModel2d::step_openmp(int steps) {
     
-    sync_padding();
+    //sync_padding();
     
     // Threads are created here and stay alive for all simulation
     #pragma omp parallel 
@@ -195,11 +223,6 @@ void IsingModel2d::step_openmp(int steps) {
                     }
                 }
             }
-
-            #pragma omp single
-            {
-                sync_padding();
-            }
             
             // odd spins
             #pragma omp for collapse(2)
@@ -211,13 +234,7 @@ void IsingModel2d::step_openmp(int steps) {
                     }
                 }
             }
-            
-            //synch padding
-            #pragma omp single
-            {
-                sync_padding();
-            }
-            
+                    
         } // end of time loop
     } // end of parallel region (threads are destroyed here)
 }
@@ -366,10 +383,17 @@ double IsingModel2d::energy(Mode mode) {
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
                 int array_index = i * row_stride + j;
-                int neighbors = lattice[(i - 1) * row_stride + j] + //down
-                                lattice[(i + 1) * row_stride + j] + //up
-                                lattice[i * row_stride + (j - 1)] + //left
-                                lattice[i * row_stride + (j + 1)]; //right
+                
+                // boundary conditions with ternary operator
+                int i_up    = (i == 1) ? L : i - 1;
+                int i_down  = (i == L) ? 1 : i + 1;
+                int j_left  = (j == 1) ? L : j - 1;
+                int j_right = (j == L) ? 1 : j + 1;
+                
+                int neighbors = lattice[i_up   * row_stride + j] + // up
+                        lattice[i_down * row_stride + j] + //down
+                        lattice[i * row_stride + j_left] + // left
+                        lattice[i * row_stride + j_right]; // right
                 
                 // Interaction energy (halved for double counting) + field energy
                 E += -0.5 * J * lattice[array_index] * neighbors - h * lattice[array_index];
@@ -383,11 +407,18 @@ double IsingModel2d::energy(Mode mode) {
         for (int i = 1; i <= L; i++) {
             for (int j = 1; j <= L; j++) {
                 int array_index = i * row_stride + j;
-                int neighbors = lattice[(i - 1) * row_stride + j] + 
-                                lattice[(i + 1) * row_stride + j] + 
-                                lattice[i * row_stride + (j - 1)] + 
-                                lattice[i * row_stride + (j + 1)];
                 
+                // boundary conditions with ternary operator
+                int i_up    = (i == 1) ? L : i - 1;
+                int i_down  = (i == L) ? 1 : i + 1;
+                int j_left  = (j == 1) ? L : j - 1;
+                int j_right = (j == L) ? 1 : j + 1;
+                
+                int neighbors = lattice[i_up   * row_stride + j] + // up
+                        lattice[i_down * row_stride + j] + //down
+                        lattice[i * row_stride + j_left] + // left
+                        lattice[i * row_stride + j_right]; // right
+                        
                 // Interaction energy (halved for double counting) + field energy
                 E += -0.5 * J * lattice[array_index] * neighbors - h * lattice[array_index];
             }
@@ -419,7 +450,6 @@ void IsingModel2d::update(Mode mode, int steps) {
         /****** SERIAL CPU EXECUTION ******/
         case Mode::serial:
             for (int i = 0; i < steps; i++) {
-                // The serial step already includes sync_padding() internally
                 step_serial();
             }
             break;

@@ -54,7 +54,12 @@ The project is compiled into a high-performance Python library using **PyBind11*
 * Python 3 and `pybind11`
 
 ### Building the Library
-Navigate to the source directory and run:
+Fork the repo and run:
 ```bash
 cd src
 make
+cd ..
+```
+
+Then you can import ising2d on pyhton and use the library (more details about it on ''benchmarks.ipynb'').
+

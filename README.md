@@ -61,5 +61,5 @@ make
 cd ..
 ```
 
-Then you can import ising2d on pyhton and use the library (more details about it on ''benchmarks.ipynb'').
+Then you can import ising2d on python and use the library (more details about it on ''benchmarks.ipynb'').
 

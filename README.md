@@ -6,7 +6,7 @@ This project focuses on the simulation and parallelization of the **2D Ising Mod
 
 The simulation utilizes the **Metropolis-Hastings Algorithm** (Markov Chain Monte Carlo) to sample configurations according to the Boltzmann distribution.
 
-[Image of 2D Ising model phase transition simulation]
+![Phase Transition Plot](./figures/phase_transition_ht.png)
 
 ## 🛠️ Implementation & Architectures
 
